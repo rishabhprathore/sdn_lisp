@@ -12,7 +12,7 @@ import requests
 from requests.auth import HTTPDigestAuth
 import json
 from pprint import pprint
-
+from ryu.lib.packet import ipv4
 from ryu.lib.packet import arp
 from ryu.lib.packet.packet import Packet
 from ryu.lib.packet.ethernet import ethernet
@@ -140,16 +140,12 @@ class ExampleSwitch13(app_manager.RyuApp):
             src = eth_pkt.src
             eth_type = eth_pkt.ethertype
             self.logger.info(src)
-
+            #self.logger.info(arpPacket.src_ip)
             
             db0[dpidToIp[str(datapath.id)]]["nbrMac"]=src
             db0[dpidToIp[str(datapath.id)]]["dpid"]=datapath.id
             db0[dpidToIp[str(datapath.id)]]["nbrPort"]=inPort
-            self.logger.info(db0)
-            ip_pkt = pkt.get_protocol(ipv4.ipv4)
-            IPV4_DST = ip_pkt.dst
-            dst_ip = ip_pkt.dst
-            IPV4_SRC = ip_pkt.src
-            self.logger.info()
+            #for p in packet.protocols:
+            #    print p
             
         
