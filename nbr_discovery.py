@@ -70,7 +70,8 @@ class ExampleSwitch13(app_manager.RyuApp):
         # install the table-miss flow entry.
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
-                                          ofproto.OFPCML_NO_BUFFER)]
+                                          ofproto.OFPCML_NO_BUFFER
+                                          )]
         self.add_flow(datapath, 0, match, actions)
         #self.ip_in_subnet("192.168.1.1","192.168.1.0",24)
         self.nbr_discovery(ev)
@@ -202,7 +203,7 @@ class ExampleSwitch13(app_manager.RyuApp):
         # adding iTR flow entry on source rloc
         self.logger.info("adding iTR flow entry on source rloc")
 
-        #itr dpid extracted from packet in datapath
+        #itr dpid extracted from packet in current datapath
 
         itr_datapath=dp
         match = ofp_parser.OFPMatch(
@@ -210,10 +211,28 @@ class ExampleSwitch13(app_manager.RyuApp):
             eth_type=0x0800,
             ipv4_src=p_ipv4_src,
             ipv4_dst=p_ipv4_dst,
+            #ip_dscp=0,
+            #ip_ecn=0,
             )
-        actions = [ofp_parser.OFPActionOutput(ofp.OFPP_FLOOD,
-                                  ofp.OFPCML_NO_BUFFER)]
+        self.logger.info("dscp id: %s", db1[p_ipv4_dst]["dscp_id"])
+        self.logger.info("rloc2 id: %s",db1[p_ipv4_dst]["rloc"])
+
+        actions = [ofp_parser.OFPActionSetField(
+                eth_src=db0[db1[p_ipv4_src]["rloc"]]["xtr_mac"],),
+              ofp_parser.OFPActionSetField(
+                ipv4_src=db1[p_ipv4_src]["rloc"]),
+              ofp_parser.OFPActionSetField(
+                ipv4_dst=db1[p_ipv4_dst]["rloc"]),
+              ofp_parser.OFPActionSetField(
+                ip_dscp=db1[p_ipv4_dst]["dscp_id"]),
+              #ofp_parser.OFPActionSetField(
+                #ip_ecn=0),
+              ofp_parser.OFPActionOutput(db1[p_ipv4_src]["nbr_rtr_port"],
+                                  ofp.OFPCML_NO_BUFFER,),]
+
         self.add_flow(itr_datapath, 20, match, actions)
+
+        #self.add_flow(itr_datapath, 20, match, actions)
 
 
         # adding eTR flow entry on dest rloc
@@ -221,13 +240,23 @@ class ExampleSwitch13(app_manager.RyuApp):
         #etr dpid extracted from db0
         etr_datapath=db0[db1[p_ipv4_dst]["rloc"]]["xtr_datapath"]
         match = ofp_parser.OFPMatch(
-            in_port=1,
+            in_port=db0[db1[p_ipv4_dst]["rloc"]]["nbr_rtr_port"],
             eth_type=0x0800,
-            ipv4_src=p_ipv4_src,
-            ipv4_dst=p_ipv4_dst,
+            ipv4_src=db1[p_ipv4_src]["rloc"],
+            ipv4_dst=db1[p_ipv4_dst]["rloc"],
+            ip_dscp=db1[p_ipv4_dst]["dscp_id"],
             )
-        actions = [ofp_parser.OFPActionOutput(ofp.OFPP_FLOOD,
-                                  ofp.OFPCML_NO_BUFFER)]
+        actions = [ofp_parser.OFPActionSetField(
+                    ipv4_dst=p_ipv4_dst),
+                    ofp_parser.OFPActionSetField(
+                    ipv4_src=p_ipv4_src),
+                    ofp_parser.OFPActionSetField(
+                    eth_dst=db1[p_ipv4_dst]["host_mac"]),
+                    ofp_parser.OFPActionSetField(
+                    ip_dscp=0),
+                    ofp_parser.OFPActionOutput(db1[p_ipv4_dst]["xtr_port"],
+                    ofp.OFPCML_NO_BUFFER,),]
+
         self.add_flow(etr_datapath,20,match,actions)
 
 
@@ -297,7 +326,7 @@ class ExampleSwitch13(app_manager.RyuApp):
             self.logger.info(pprint(db0))
             #for p in packet.protocols:
             #    print p
-            
+
     def resolve_arp_xtr(self, datapath, srcMac, srcIp, dstMac, dstIp, outPort):
         self.send_arp(datapath, 2, srcMac, srcIp, dstMac, dstIp, outPort)
         self.logger.info("send ARP reply %s => %s (port%d)" %(srcMac, dstMac, outPort))
