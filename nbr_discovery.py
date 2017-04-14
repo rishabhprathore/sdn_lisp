@@ -1,6 +1,5 @@
 from ryu.base import app_manager
 from ryu.controller import ofp_event
-
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
@@ -18,6 +17,7 @@ from ryu.lib.packet.packet import Packet
 from ryu.lib.packet.ethernet import ethernet
 from ryu.lib.packet.arp import arp
 from ryu.ofproto import ether
+from netaddr import IPNetwork, IPAddress
 
 
 """db0: nbr discovery
@@ -27,8 +27,12 @@ from ryu.ofproto import ether
 # variables declared here
 
 db0={"3.0.0.1":{},'5.0.0.1':{}}
+db1={"1.0.0.10":{}}
 dpidToIp={'161442412056386':'3.0.0.1','223103364804175':'5.0.0.1'}
 ipToNbr={'3.0.0.1':'3.0.0.2','5.0.0.1':'5.0.0.2'}
+fakeMac="aa:aa:aa:aa:aa:aa"
+rloc_counter={"3.0.0.1":0,"5.0.0.1":0}
+
 
 
 
@@ -42,6 +46,17 @@ class ExampleSwitch13(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super(ExampleSwitch13, self).__init__(*args, **kwargs)
 
+
+    def ip_in_subnet(self, ip_address, ip_network, netmask):
+        ip_subnet=ip_network+'/'+str(netmask)
+        if IPAddress(ip_address) in IPNetwork(ip_subnet):
+            self.logger.info("yayy!")
+            return True
+        else:
+            self.logger.info("NAyyy")    
+            return False
+
+
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
@@ -53,6 +68,7 @@ class ExampleSwitch13(app_manager.RyuApp):
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
                                           ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions)
+        #self.ip_in_subnet("192.168.1.1","192.168.1.0",24)
         self.nbr_discovery(ev)
 
 
@@ -65,7 +81,9 @@ class ExampleSwitch13(app_manager.RyuApp):
         xtr_ip=dpidToIp[str(datapath.id)]
         nbr_ip=ipToNbr[xtr_ip]
         self.logger.info(datapath.id)
-        self.send_arp(datapath, 1, "00:0a:00:0a:00:00", xtr_ip, "ff:ff:ff:ff:ff:ff", nbr_ip, ofproto.OFPP_FLOOD)
+        self.send_arp(datapath, 1, fakeMac, xtr_ip, "ff:ff:ff:ff:ff:ff", nbr_ip, ofproto.OFPP_FLOOD)
+
+    
 
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
@@ -75,17 +93,80 @@ class ExampleSwitch13(app_manager.RyuApp):
         ofp = dp.ofproto
         ofp_parser = dp.ofproto_parser
 
-        inPort = msg.match['in_port']
-
+        in_port = msg.match['in_port']
+        DPID=dp.id
         packet = Packet(msg.data)
         etherFrame = packet.get_protocol(ethernet)
+        dst_mac = etherFrame.dst
+        src_mac = etherFrame.src
+        eth_type = etherFrame.ethertype
+        #eth_type = eth_pkt.ethertype
+        arp_pkt = packet.get_protocol(arp)
+        ipv4_src = arp_pkt.src_ip
+        ipv4_dst = arp_pkt.dst_ip
         self.logger.info("packet in recv ")
+
+
+       
+
+
+        # if arp packet and ipv4_dst and ipv4_src is a registered host then reply for arp
         if etherFrame.ethertype == ether.ETH_TYPE_ARP:
-            self.receive_arp(dp, packet, etherFrame, inPort)
-            return 0
-        else:
-            self.logger.info("Drop packet")
-            return 1
+            self.logger.info(etherFrame.ethertype)
+            eth_pkt = packet.get_protocol(ethernet)
+            if ipv4_dst in db1 and ipv4_src in db1:
+                self.logger.info("ARP request for valid lisp host")
+                self.logger.info("dst ip: %s",ipv4_dst)
+                arp_src_mac=db1[ipv4_src]["nbr_rtr_mac"]
+                arp_src_ip=ipv4_dst
+                arp_dst_mac=src_mac
+                arp_dst_ip=ipv4_src
+                arp_out_port=in_port
+                self.reply_arp(dp, arp_src_mac, arp_src_ip, arp_dst_mac, arp_dst_ip, in_port)
+                return 0
+            else:
+                self.logger.info("ARP request for invalid lisp host")
+                self.logger.info("dst ip: %s",ipv4_dst)        
+                #reply_arp(self, datapath, srcMac, srcIp, dstMac, dstIp, outPort):
+                #self.logger.info(ipv4_dst)
+                
+
+        # hook for neighbor discovery
+        # if arp packet and dst_mac is fakeMac then reply from nbr router
+        if etherFrame.ethertype == ether.ETH_TYPE_ARP:
+            self.logger.info(etherFrame.ethertype)
+            eth_pkt = packet.get_protocol(ethernet)
+            dst = eth_pkt.dst
+            if dst == fakeMac:
+                self.receive_arp(dp, packet, etherFrame, in_port)
+                return 0
+
+        
+
+        self.logger.info("packet in DPID:%s src_mac:%s dst_mac:%s in_port:%s", DPID, src_mac, dst_mac,  in_port)
+        self.logger.info("Ether Type %s", eth_type)
+        #eth = pkt.get_protocols(ethernet.ethernet)[0]
+        
+         # hook for host discovery
+        if ipv4_src not in db1:
+            self.host_discovery(DPID, ipv4_src, src_mac, in_port)
+        #self.logger.info("SRC_IP:%s", IPV4_SRC)
+
+
+
+
+    def host_discovery(self, DPID, ipv4_src, src_mac, in_port):
+        self.logger.info("host discovery process starts")
+        self.logger.info("adding entry into db1")
+        rloc_counter[dpidToIp[str(DPID)]] += 1#rloc_counter[dpidToIp[str(DPID)] +1
+        db1[ipv4_src]={"netmask":32,"rloc":dpidToIp[str(DPID)],"host_mac":src_mac,
+                        "nbr_rtr_mac":db0[dpidToIp[str(DPID)]]["nbr_mac"],
+                        "xtr_port":in_port,
+                        "nbr_rtr_port":db0[dpidToIp[str(DPID)]]["nbr_rtr_port"],
+                        "dscp_id":rloc_counter[dpidToIp[str(DPID)]]}
+        self.logger.info("rloc-counter:")                
+        self.logger.info(rloc_counter)
+        self.logger.info(pprint(db1))
 
 
     def add_flow(self, datapath, priority, match, actions):
@@ -124,14 +205,14 @@ class ExampleSwitch13(app_manager.RyuApp):
         datapath.send_msg(out)
 
 
-    def receive_arp(self, datapath, packet, etherFrame, inPort):
+    def receive_arp(self, datapath, packet, etherFrame, in_port):
         arpPacket = packet.get_protocol(arp)
 
         if arpPacket.opcode == 1:
             arp_dstIp = arpPacket.dst_ip
             self.logger.info("receive ARP request %s => %s (port%d)"
-                       %(etherFrame.src, etherFrame.dst, inPort))
-            #self.reply_arp(datapath, etherFrame, arpPacket, arp_dstIp, inPort)
+                       %(etherFrame.src, etherFrame.dst, in_port))
+            #self.reply_arp(datapath, etherFrame, arpPacket, arp_dstIp, in_port)
         elif arpPacket.opcode == 2:
 
             self.logger.info("ARP reply recvd")
@@ -142,10 +223,20 @@ class ExampleSwitch13(app_manager.RyuApp):
             self.logger.info(src)
             #self.logger.info(arpPacket.src_ip)
             
-            db0[dpidToIp[str(datapath.id)]]["nbrMac"]=src
+            db0[dpidToIp[str(datapath.id)]]["nbr_mac"]=src
             db0[dpidToIp[str(datapath.id)]]["dpid"]=datapath.id
-            db0[dpidToIp[str(datapath.id)]]["nbrPort"]=inPort
+            db0[dpidToIp[str(datapath.id)]]["nbr_rtr_port"]=in_port
+            rloc_counter[dpidToIp[str(datapath.id)]]=0
+            
+            self.logger.info(pprint(db0))
             #for p in packet.protocols:
             #    print p
-            
+
+    def reply_arp(self, datapath, srcMac, srcIp, dstMac, dstIp, outPort):
+        """dstIp = arpPacket.src_ip
+            srcIp = arpPacket.dst_ip
+            dstMac = etherFrame.src"""
         
+
+        self.send_arp(datapath, 2, srcMac, srcIp, dstMac, dstIp, outPort)
+        self.logger.info("send ARP reply %s => %s (port%d)" %(srcMac, dstMac, outPort))
