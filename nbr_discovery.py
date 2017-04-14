@@ -32,6 +32,7 @@ dpidToIp={'161442412056386':'3.0.0.1','223103364804175':'5.0.0.1'}
 ipToNbr={'3.0.0.1':'3.0.0.2','5.0.0.1':'5.0.0.2'}
 fakeMac="aa:aa:aa:aa:aa:aa"
 rloc_counter={"3.0.0.1":0,"5.0.0.1":0}
+dpidToMac={'161442412056386':'92:d4:bd:9f:4f:42','223103364804175':'ca:e9:4c:ce:ae:4f'}
 
 
 
@@ -55,6 +56,9 @@ class ExampleSwitch13(app_manager.RyuApp):
         else:
             self.logger.info("NAyyy")    
             return False
+
+    def dpid_to_mac(dpid):
+        pass
 
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
@@ -102,8 +106,8 @@ class ExampleSwitch13(app_manager.RyuApp):
         eth_type = etherFrame.ethertype
         #eth_type = eth_pkt.ethertype
         arp_pkt = packet.get_protocol(arp)
-        ipv4_src = arp_pkt.src_ip
-        ipv4_dst = arp_pkt.dst_ip
+        p_ipv4_src = arp_pkt.src_ip
+        p_ipv4_dst = arp_pkt.dst_ip
         self.logger.info("packet in recv ")
 
 
@@ -114,19 +118,21 @@ class ExampleSwitch13(app_manager.RyuApp):
         if etherFrame.ethertype == ether.ETH_TYPE_ARP:
             self.logger.info(etherFrame.ethertype)
             eth_pkt = packet.get_protocol(ethernet)
-            if ipv4_dst in db1 and ipv4_src in db1:
+            if p_ipv4_dst in db1 and p_ipv4_src in db1:
                 self.logger.info("ARP request for valid lisp host")
-                self.logger.info("dst ip: %s",ipv4_dst)
-                arp_src_mac=db1[ipv4_src]["nbr_rtr_mac"]
-                arp_src_ip=ipv4_dst
+                self.logger.info("dst ip: %s",p_ipv4_dst)
+                arp_src_mac=db1[p_ipv4_src]["nbr_rtr_mac"]
+                arp_src_ip=p_ipv4_dst
                 arp_dst_mac=src_mac
-                arp_dst_ip=ipv4_src
+                arp_dst_ip=p_ipv4_src
                 arp_out_port=in_port
                 self.reply_arp(dp, arp_src_mac, arp_src_ip, arp_dst_mac, arp_dst_ip, in_port)
+                #calling module to add flow entries on xTRs
+                self.xtr_flow_entry(ev)
                 return 0
             else:
                 self.logger.info("ARP request for invalid lisp host")
-                self.logger.info("dst ip: %s",ipv4_dst)        
+                self.logger.info("dst ip: %s",p_ipv4_dst)        
                 #reply_arp(self, datapath, srcMac, srcIp, dstMac, dstIp, outPort):
                 #self.logger.info(ipv4_dst)
                 
@@ -148,8 +154,9 @@ class ExampleSwitch13(app_manager.RyuApp):
         #eth = pkt.get_protocols(ethernet.ethernet)[0]
         
          # hook for host discovery
-        if ipv4_src not in db1:
-            self.host_discovery(DPID, ipv4_src, src_mac, in_port)
+        if p_ipv4_src not in db1:
+            self.host_discovery(DPID, p_ipv4_src, src_mac, in_port)
+
         #self.logger.info("SRC_IP:%s", IPV4_SRC)
 
 
@@ -158,7 +165,7 @@ class ExampleSwitch13(app_manager.RyuApp):
     def host_discovery(self, DPID, ipv4_src, src_mac, in_port):
         self.logger.info("host discovery process starts")
         self.logger.info("adding entry into db1")
-        rloc_counter[dpidToIp[str(DPID)]] += 1#rloc_counter[dpidToIp[str(DPID)] +1
+        rloc_counter[dpidToIp[str(DPID)]] += 1
         db1[ipv4_src]={"netmask":32,"rloc":dpidToIp[str(DPID)],"host_mac":src_mac,
                         "nbr_rtr_mac":db0[dpidToIp[str(DPID)]]["nbr_mac"],
                         "xtr_port":in_port,
@@ -167,6 +174,63 @@ class ExampleSwitch13(app_manager.RyuApp):
         self.logger.info("rloc-counter:")                
         self.logger.info(rloc_counter)
         self.logger.info(pprint(db1))
+
+
+
+    def xtr_flow_entry(self, ev):
+        """adds flow entry on both itr and etr 
+        for one way traffic"""
+        
+        #extracting required variables
+        msg = ev.msg
+        dp = msg.datapath
+        ofp = dp.ofproto
+        ofp_parser = dp.ofproto_parser
+
+        inPort = msg.match['in_port']
+        DPID=dp.id
+        packet = Packet(msg.data)
+        etherFrame = packet.get_protocol(ethernet)
+        dst_mac = etherFrame.dst
+        src_mac = etherFrame.src
+        eth_type = etherFrame.ethertype
+        #eth_type = eth_pkt.ethertype
+        arp_pkt = packet.get_protocol(arp)
+        p_ipv4_src = arp_pkt.src_ip
+        p_ipv4_dst = arp_pkt.dst_ip
+
+        # adding iTR flow entry on source rloc
+        self.logger.info("adding iTR flow entry on source rloc")
+
+        #itr dpid extracted from packet in datapath
+
+        itr_datapath=dp
+        match = ofp_parser.OFPMatch(
+            in_port=inPort,
+            eth_type=0x0800,
+            ipv4_src=p_ipv4_src,
+            ipv4_dst=p_ipv4_dst,
+            )
+        actions = [ofp_parser.OFPActionOutput(ofp.OFPP_FLOOD,
+                                  ofp.OFPCML_NO_BUFFER)]
+        self.add_flow(itr_datapath, 20, match, actions)
+
+
+        # adding eTR flow entry on dest rloc
+        self.logger.info("adding eTR flow entry on destination rloc")
+        #etr dpid extracted from db0
+        etr_datapath=db0[db1[p_ipv4_dst][rloc]][xtr_datapath]
+        match = ofp_parser.OFPMatch(
+            in_port=1,
+            eth_type=0x0800,
+            ipv4_src=p_ipv4_src,
+            ipv4_dst=p_ipv4_dst,
+            )
+        actions = [ofp_parser.OFPActionOutput(ofp.OFPP_FLOOD,
+                                  ofp.OFPCML_NO_BUFFER)]
+        self.add_flow(etr_datapath,20,match,actions)
+
+
 
 
     def add_flow(self, datapath, priority, match, actions):
@@ -226,6 +290,8 @@ class ExampleSwitch13(app_manager.RyuApp):
             db0[dpidToIp[str(datapath.id)]]["nbr_mac"]=src
             db0[dpidToIp[str(datapath.id)]]["dpid"]=datapath.id
             db0[dpidToIp[str(datapath.id)]]["nbr_rtr_port"]=in_port
+            db0[dpidToIp[str(datapath.id)]]["xtr_datapath"]=datapath
+            db0[dpidToIp[str(datapath.id)]]["xtr_mac"]=dpidToMac[str(datapath.id)]
             rloc_counter[dpidToIp[str(datapath.id)]]=0
             
             self.logger.info(pprint(db0))
