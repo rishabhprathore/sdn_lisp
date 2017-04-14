@@ -219,7 +219,7 @@ class ExampleSwitch13(app_manager.RyuApp):
         # adding eTR flow entry on dest rloc
         self.logger.info("adding eTR flow entry on destination rloc")
         #etr dpid extracted from db0
-        etr_datapath=db0[db1[p_ipv4_dst][rloc]][xtr_datapath]
+        etr_datapath=db0[db1[p_ipv4_dst]["rloc"]]["xtr_datapath"]
         match = ofp_parser.OFPMatch(
             in_port=1,
             eth_type=0x0800,
@@ -297,6 +297,10 @@ class ExampleSwitch13(app_manager.RyuApp):
             self.logger.info(pprint(db0))
             #for p in packet.protocols:
             #    print p
+            
+    def resolve_arp_xtr(self, datapath, srcMac, srcIp, dstMac, dstIp, outPort):
+        self.send_arp(datapath, 2, srcMac, srcIp, dstMac, dstIp, outPort)
+        self.logger.info("send ARP reply %s => %s (port%d)" %(srcMac, dstMac, outPort))
 
     def reply_arp(self, datapath, srcMac, srcIp, dstMac, dstIp, outPort):
         """dstIp = arpPacket.src_ip
