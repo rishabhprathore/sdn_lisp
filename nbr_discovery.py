@@ -106,13 +106,41 @@ class ExampleSwitch13(app_manager.RyuApp):
         src_mac = etherFrame.src
         eth_type = etherFrame.ethertype
         #eth_type = eth_pkt.ethertype
+        if eth_type==0x0800:
+            self.logger.info("controller recieved icmp packet")
+            ip_pkt = packet.get_protocol(ipv4.ipv4)
+            if ip_pkt.src in db1 and ip_pkt.dst in db1:
+                self.logger.info("Adding flow for icmp packet")
+                self.xtr_flow_entry(ev)
+
+            return 0
         arp_pkt = packet.get_protocol(arp)
         p_ipv4_src = arp_pkt.src_ip
         p_ipv4_dst = arp_pkt.dst_ip
         self.logger.info("packet in recv ")
 
 
-       
+        # hook for neighbor discovery
+        # if arp packet and dst_mac is fakeMac then reply from nbr router
+        if etherFrame.ethertype == ether.ETH_TYPE_ARP:
+            self.logger.info(etherFrame.ethertype)
+            eth_pkt = packet.get_protocol(ethernet)
+            dst = eth_pkt.dst
+            if dst == fakeMac:
+                self.receive_arp(dp, packet, etherFrame, in_port)
+                return 0
+
+        
+
+        self.logger.info("packet in DPID:%s src_mac:%s dst_mac:%s in_port:%s", DPID, src_mac, dst_mac,  in_port)
+        self.logger.info("Ether Type %s", eth_type)
+        #eth = pkt.get_protocols(ethernet.ethernet)[0]
+
+        # hook for host discovery
+        if p_ipv4_src not in db1:
+            self.host_discovery(DPID, p_ipv4_src, src_mac, in_port)
+            return 0
+        #self.logger.info("SRC_IP:%s", IPV4_SRC)
 
 
         # if arp packet and ipv4_dst and ipv4_src is a registered host then reply for arp
@@ -138,27 +166,9 @@ class ExampleSwitch13(app_manager.RyuApp):
                 #self.logger.info(ipv4_dst)
                 
 
-        # hook for neighbor discovery
-        # if arp packet and dst_mac is fakeMac then reply from nbr router
-        if etherFrame.ethertype == ether.ETH_TYPE_ARP:
-            self.logger.info(etherFrame.ethertype)
-            eth_pkt = packet.get_protocol(ethernet)
-            dst = eth_pkt.dst
-            if dst == fakeMac:
-                self.receive_arp(dp, packet, etherFrame, in_port)
-                return 0
-
         
-
-        self.logger.info("packet in DPID:%s src_mac:%s dst_mac:%s in_port:%s", DPID, src_mac, dst_mac,  in_port)
-        self.logger.info("Ether Type %s", eth_type)
-        #eth = pkt.get_protocols(ethernet.ethernet)[0]
         
-         # hook for host discovery
-        if p_ipv4_src not in db1:
-            self.host_discovery(DPID, p_ipv4_src, src_mac, in_port)
-
-        #self.logger.info("SRC_IP:%s", IPV4_SRC)
+         
 
 
 
@@ -196,9 +206,17 @@ class ExampleSwitch13(app_manager.RyuApp):
         src_mac = etherFrame.src
         eth_type = etherFrame.ethertype
         #eth_type = eth_pkt.ethertype
-        arp_pkt = packet.get_protocol(arp)
-        p_ipv4_src = arp_pkt.src_ip
-        p_ipv4_dst = arp_pkt.dst_ip
+        if eth_type==0x0806:
+            # arp packet
+            arp_pkt = packet.get_protocol(arp)
+            p_ipv4_src = arp_pkt.src_ip
+            p_ipv4_dst = arp_pkt.dst_ip
+
+        if eth_type==0x0800:
+            # icmp packet
+            ip_pkt = packet.get_protocol(ipv4.ipv4)
+            p_ipv4_src = ip_pkt.src
+            p_ipv4_dst = ip_pkt.dst
 
         # adding iTR flow entry on source rloc
         self.logger.info("adding iTR flow entry on source rloc")
