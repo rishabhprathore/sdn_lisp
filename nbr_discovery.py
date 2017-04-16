@@ -20,21 +20,21 @@ from ryu.ofproto import ether
 from netaddr import IPNetwork, IPAddress
 
 
-"""db0: nbr discovery
-    RLOC, DPID, NBR MAC, o/p port NBR"""
 
 
 # variables declared here
 
-db0={"3.0.0.1":{},'5.0.0.1':{}}
-db1={"1.0.0.10":{}}
-dpidToIp={'161442412056386':'3.0.0.1','223103364804175':'5.0.0.1'}
-ipToNbr={'3.0.0.1':'3.0.0.2','5.0.0.1':'5.0.0.2'}
+db0={"3.0.0.1":{},'5.0.0.1':{},'7.0.0.1':{}}
+db1={"299.0.0.99":{}}
+mobile_db={"299.0.0.99":{}}
+dpidToIp={'161442412056386':'3.0.0.1','223103364804175':'5.0.0.1','54980754004038':'7.0.0.1'}
+ipToNbr={'3.0.0.1':'3.0.0.2','5.0.0.1':'5.0.0.2','7.0.0.1':'7.0.0.2'}
 fakeMac="aa:aa:aa:aa:aa:aa"
-rloc_counter={"3.0.0.1":0,"5.0.0.1":0}
-dpidToMac={'161442412056386':'92:d4:bd:9f:4f:42','223103364804175':'ca:e9:4c:ce:ae:4f'}
-
-
+rloc_counter={"3.0.0.1":0,"5.0.0.1":0,"7.0.0.1":0}
+dpidToMac={'161442412056386':'92:d4:bd:9f:4f:42',
+            '223103364804175':'ca:e9:4c:ce:ae:4f',
+            '54980754004038':'32:01:34:4f:d8:46'}
+mobility_detect_ip="127.0.0.1"
 
 
 class ExampleSwitch13(app_manager.RyuApp):
@@ -85,7 +85,7 @@ class ExampleSwitch13(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         xtr_ip=dpidToIp[str(datapath.id)]
         nbr_ip=ipToNbr[xtr_ip]
-        self.logger.info(datapath.id)
+        #self.logger.info(datapath.id)
         self.send_arp(datapath, 1, fakeMac, xtr_ip, "ff:ff:ff:ff:ff:ff", nbr_ip, ofproto.OFPP_FLOOD)
 
     
@@ -105,74 +105,154 @@ class ExampleSwitch13(app_manager.RyuApp):
         dst_mac = etherFrame.dst
         src_mac = etherFrame.src
         eth_type = etherFrame.ethertype
+
         #eth_type = eth_pkt.ethertype
+
+        self.logger.info("packet in DPID:%s src_mac:%s dst_mac:%s in_port:%s", DPID, src_mac, dst_mac,  in_port)
+        self.logger.info("Ether Type %s", eth_type)
+
+
+
+        # if not arp or ip packet drop
+        if eth_type!=0x0800 and eth_type!=0x0806:
+            self.logger.info("drop packet of ether_type: %s",eth_type)
+            return 0
+
         if eth_type==0x0800:
-            self.logger.info("controller recieved icmp packet")
+            self.logger.info("controller recieved IP packet")
             ip_pkt = packet.get_protocol(ipv4.ipv4)
+            p_ipv4_src = ip_pkt.src
+            p_ipv4_dst = ip_pkt.dst
+
+            if p_ipv4_dst == mobility_detect_ip:
+                self.logger.info("Mobility notification detected")
+                # delete flow entries on itr with old mappings
+                #self.delete_old_mapping_itr(self,ev)
+                return 0
+
+
+
+            if p_ipv4_src not in db1:
+                self.logger.info("New host activated from IP")
+                self.host_discovery(DPID, p_ipv4_src, src_mac, in_port)
+                return 0
+
+            # check for mobility:
+            if p_ipv4_src in db1 and db1[p_ipv4_src]["rloc"] != dpidToIp[str(DPID)]:
+                self.logger.info("Host %s is Mobile",p_ipv4_src)
+                self.logger.info("Previous RLOC: %s",db1[p_ipv4_src]["rloc"])
+                self.logger.info("Current RLOC: %s",dpidToIp[str(DPID)])
+                self.mobility_event(ev)
+                return 0    
+
             if ip_pkt.src in db1 and ip_pkt.dst in db1:
-                self.logger.info("Adding flow for icmp packet")
+                self.logger.info("Adding flow for IP packet")
+
                 self.xtr_flow_entry(ev)
 
-            return 0
-        arp_pkt = packet.get_protocol(arp)
-        p_ipv4_src = arp_pkt.src_ip
-        p_ipv4_dst = arp_pkt.dst_ip
-        self.logger.info("packet in recv ")
+            #return 0s
+
+        if eth_type==0x0806:
+            # arp packet    
+            arp_pkt = packet.get_protocol(arp)
+            p_ipv4_src = arp_pkt.src_ip
+            p_ipv4_dst = arp_pkt.dst_ip
+            #self.logger.info("packet in recv ")
 
 
         # hook for neighbor discovery
         # if arp packet and dst_mac is fakeMac then reply from nbr router
         if etherFrame.ethertype == ether.ETH_TYPE_ARP:
-            self.logger.info(etherFrame.ethertype)
             eth_pkt = packet.get_protocol(ethernet)
             dst = eth_pkt.dst
             if dst == fakeMac:
+                self.logger.info("ARP reply from nbr router")
                 self.receive_arp(dp, packet, etherFrame, in_port)
                 return 0
 
         
 
-        self.logger.info("packet in DPID:%s src_mac:%s dst_mac:%s in_port:%s", DPID, src_mac, dst_mac,  in_port)
-        self.logger.info("Ether Type %s", eth_type)
-        #eth = pkt.get_protocols(ethernet.ethernet)[0]
+        
+        
 
         # hook for host discovery
         if p_ipv4_src not in db1:
+            self.logger.info("New host activated through arp")
             self.host_discovery(DPID, p_ipv4_src, src_mac, in_port)
             return 0
+
+        elif p_ipv4_src in db1 and db1[p_ipv4_src]["rloc"] != dpidToIp[str(DPID)]:
+            self.logger.info("Host %s is Mobile",p_ipv4_src)
+            self.logger.info("Previous RLOC: %s",db1[p_ipv4_src]["rloc"])
+            self.logger.info("Current RLOC: %s",dpidToIp[str(DPID)])
+            # mobility TBD
+            self.mobility_event(ev)
+
+            return 0
+
+        elif p_ipv4_src in db1 and p_ipv4_dst not in db1:
+            self.logger.info("Source registered but Destination does not exist")
+            #add flow to drop packet
+            self.logger.info("Add 1 priority flow on iTR to drop packets for EID: %s",p_ipv4_dst)
+            itr_datapath=dp
+            """
+            match = ofp_parser.OFPMatch(
+                in_port=in_port,
+                eth_type=0x0800,#ip packet
+                ipv4_dst=p_ipv4_dst,
+                )
+            actions = [ofp_parser.OFPActionOutput(in_port,
+                ofp.OFPCML_NO_BUFFER,),]
+
+            self.add_flow(itr_datapath, 1, match, actions)
+            """
+            # hard timeout TBD
+            match = ofp_parser.OFPMatch(
+                in_port=in_port,
+                eth_type=0x0806,#arp packet
+                arp_tpa=p_ipv4_dst,
+                )
+
+            actions = [ofp_parser.OFPActionOutput(in_port,
+                ofp.OFPCML_NO_BUFFER,),]
+
+            self.add_flow(itr_datapath, 1, match, actions)
+            
+        elif p_ipv4_src in db1 and db1[p_ipv4_src]["rloc"] == dpidToIp[str(DPID)]:
+            self.logger.info("Host %s is not mobile",p_ipv4_src)
+
+        
+
         #self.logger.info("SRC_IP:%s", IPV4_SRC)
 
 
         # if arp packet and ipv4_dst and ipv4_src is a registered host then reply for arp
         if etherFrame.ethertype == ether.ETH_TYPE_ARP:
-            self.logger.info(etherFrame.ethertype)
+            #self.logger.info(etherFrame.ethertype)
             eth_pkt = packet.get_protocol(ethernet)
             if p_ipv4_dst in db1 and p_ipv4_src in db1:
-                self.logger.info("ARP request for valid lisp host")
-                self.logger.info("dst ip: %s",p_ipv4_dst)
+                self.logger.info("ARP request for valid lisp host : %s",p_ipv4_dst)
                 arp_src_mac=db1[p_ipv4_src]["nbr_rtr_mac"]
                 arp_src_ip=p_ipv4_dst
                 arp_dst_mac=src_mac
                 arp_dst_ip=p_ipv4_src
                 arp_out_port=in_port
                 self.reply_arp(dp, arp_src_mac, arp_src_ip, arp_dst_mac, arp_dst_ip, in_port)
+
                 #calling module to add flow entries on xTRs
-                self.xtr_flow_entry(ev)
+                #self.xtr_flow_entry(ev)
                 return 0
+
             else:
-                self.logger.info("ARP request for invalid lisp host")
-                self.logger.info("dst ip: %s",p_ipv4_dst)        
+                self.logger.info("ARP request for invalid lisp host: %s", p_ipv4_dst)
+                #self.logger.info("dst ip: %s",p_ipv4_dst)        
                 #reply_arp(self, datapath, srcMac, srcIp, dstMac, dstIp, outPort):
                 #self.logger.info(ipv4_dst)
                 
 
         
         
-         
-
-
-
-
+        
     def host_discovery(self, DPID, ipv4_src, src_mac, in_port):
         self.logger.info("host discovery process starts")
         self.logger.info("adding entry into db1")
@@ -186,6 +266,122 @@ class ExampleSwitch13(app_manager.RyuApp):
         self.logger.info(rloc_counter)
         self.logger.info(pprint(db1))
 
+
+    def mobility_event(self, ev):
+        msg = ev.msg
+        dp = msg.datapath
+        ofp = dp.ofproto
+        ofp_parser = dp.ofproto_parser
+
+        in_port = msg.match['in_port']
+        DPID=dp.id
+        packet = Packet(msg.data)
+        etherFrame = packet.get_protocol(ethernet)
+        dst_mac = etherFrame.dst
+        src_mac = etherFrame.src
+        eth_type = etherFrame.ethertype
+
+        #eth_type = eth_pkt.ethertype
+
+        self.logger.info("executing mobility function")
+
+        if eth_type==0x0800:
+            self.logger.info("controller recieved IP packet")
+            ip_pkt = packet.get_protocol(ipv4.ipv4)
+            p_ipv4_src = ip_pkt.src
+            p_ipv4_dst = ip_pkt.dst
+
+        elif eth_type==0x0806:
+            # arp packet    
+            arp_pkt = packet.get_protocol(arp)
+            self.logger.info("controller recieved ARP packet")
+            p_ipv4_src = arp_pkt.src_ip
+            p_ipv4_dst = arp_pkt.dst_ip
+
+        self.logger.info("Previous RLOC: %s",db1[p_ipv4_src]["rloc"])
+        self.logger.info("Current RLOC: %s",dpidToIp[str(DPID)])
+
+        prev_rloc = db1[p_ipv4_src]["rloc"]
+        curr_rloc = dpidToIp[str(DPID)]
+        self.logger.info("deleting flow entry on previous rloc")
+
+        self.delete_flow_entry_prev_xtr(ev, prev_rloc, p_ipv4_src)
+
+        self.logger.info("add flow entry on prev rloc to notify controller")
+        self.add_flow_entry_prev_xtr(ev, prev_rloc, p_ipv4_src)
+
+        #move mobile device info to mobile_db
+        mobile_device_ip=p_ipv4_src
+
+        mobile_db[mobile_device_ip]=db1[mobile_device_ip]
+        del db1[mobile_device_ip]
+        
+        self.logger.info("Updated mobile db:")
+        self.logger.info(pprint(mobile_db))
+
+        #mobile host discovery => mapping with new rloc
+
+        new_dpid = db0[curr_rloc]["dpid"]
+
+        self.logger.info("mobile host discovery; adding new db1 entry")
+        self.host_discovery(new_dpid, mobile_device_ip, src_mac, in_port)
+
+        return 0
+
+
+
+
+    def add_flow_entry_prev_xtr(self, ev, prev_rloc, mobile_device_ip):
+        msg = ev.msg
+
+        
+        self.logger.info("adding mobility flow on prev xtr: %s", prev_rloc)
+        datapath=db0[prev_rloc]["xtr_datapath"]
+        ofp = datapath.ofproto
+        ofp_parser = datapath.ofproto_parser
+        match = ofp_parser.OFPMatch(
+            eth_type=0x0800,
+            ip_dscp=db1[mobile_device_ip]["dscp_id"],
+            in_port=db0[prev_rloc]["nbr_rtr_port"],
+            ipv4_dst=prev_rloc
+            )
+        actions = [ofp_parser.OFPActionSetField(
+                ipv4_dst=mobility_detect_ip),
+              ofp_parser.OFPActionOutput(ofp.OFPP_CONTROLLER,
+                ofp.OFPCML_NO_BUFFER)]
+
+        self.add_flow(datapath, 20, match, actions)
+        
+
+
+    def delete_flow_entry_prev_xtr(self,ev, prev_rloc, mobile_device_ip):
+        msg = ev.msg
+
+        
+        # deleting egress flow from core to xtr
+        datapath=db0[prev_rloc]["xtr_datapath"]
+        ofp = datapath.ofproto
+        ofp_parser = datapath.ofproto_parser
+        match = ofp_parser.OFPMatch(
+            eth_type=0x0800,
+            ip_dscp=db1[mobile_device_ip]["dscp_id"],
+            in_port=db0[prev_rloc]["nbr_rtr_port"],
+            )
+        mod = ofp_parser.OFPFlowMod(datapath=datapath, table_id=0, cookie=1,
+            command=ofp.OFPFC_DELETE,out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY, 
+            priority=20, match=match)
+        datapath.send_msg(mod)
+
+        # deleting egress flow from xtr to core
+        match = ofp_parser.OFPMatch(
+            eth_type=0x0800,
+            ipv4_src=mobile_device_ip,
+            in_port=db1[mobile_device_ip]["xtr_port"],
+            )
+        mod = ofp_parser.OFPFlowMod(datapath=datapath, table_id=0, cookie=1,
+            command=ofp.OFPFC_DELETE,out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY, 
+            priority=20, match=match)
+        datapath.send_msg(mod)
 
 
     def xtr_flow_entry(self, ev):
@@ -340,8 +536,10 @@ class ExampleSwitch13(app_manager.RyuApp):
             db0[dpidToIp[str(datapath.id)]]["xtr_datapath"]=datapath
             db0[dpidToIp[str(datapath.id)]]["xtr_mac"]=dpidToMac[str(datapath.id)]
             rloc_counter[dpidToIp[str(datapath.id)]]=0
+
             
             self.logger.info(pprint(db0))
+            self.logger.info("RLOC discovery complete")
             #for p in packet.protocols:
             #    print p
 
