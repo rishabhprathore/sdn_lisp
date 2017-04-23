@@ -19,24 +19,33 @@ from ryu.lib.packet.arp import arp
 from ryu.ofproto import ether
 from netaddr import IPNetwork, IPAddress
 import ctypes
+import os
 
 
+# variables declared here for new topology
 
-# variables declared here
-
-db0={"3.0.0.1":{},'5.0.0.1':{},'7.0.0.1':{}}
-db1={"299.0.0.99":{}}
+db0={"60.0.0.1":{},'70.0.0.1':{},'80.0.0.1':{}, '90.0.0.1':{}}
+db1={}
 mobile_db=[]
-dpidToIp={'161442412056386':'3.0.0.1','223103364804175':'5.0.0.1','54980754004038':'7.0.0.1'}
-ipToNbr={'3.0.0.1':'3.0.0.2','5.0.0.1':'5.0.0.2','7.0.0.1':'7.0.0.2'}
+dpidToIp={'147534647813704':'60.0.0.1',
+            '55078337627976':'70.0.0.1',
+            '99722776018242':'80.0.0.1',
+            '240020097669959':'90.0.0.1'}
+
+ipToNbr={'60.0.0.1':'60.0.0.2','70.0.0.1':'70.0.0.2','80.0.0.1':'80.0.0.2','90.0.0.1':'90.0.0.2'}
 fakeMac="aa:aa:aa:aa:aa:aa"
-rloc_counter={"3.0.0.1":0,"5.0.0.1":0,"7.0.0.1":0}
-dpidToMac={'161442412056386':'92:d4:bd:9f:4f:42',
-            '223103364804175':'ca:e9:4c:ce:ae:4f',
-            '54980754004038':'32:01:34:4f:d8:46'}
+
+rloc_counter={"60.0.0.1":-1,'70.0.0.1':-1,'80.0.0.1':-1, '90.0.0.1':-1}
+
+dpidToMac={'147534647813704':'86:2e:96:46:66:48',
+            '55078337627976':'32:17:ec:bf:c7:48',
+            '99722776018242':'5a:b2:84:a3:fd:42',
+            '240020097669959':'da:4c:08:a9:1b:47'}
+
 mobility_detect_ip="127.0.0.1"
-IDLE_TIMEOUT=5
-HARD_TIMEOUT=15
+IDLE_TIMEOUT=30
+HARD_TIMEOUT=0
+
 
 class ExampleSwitch13(app_manager.RyuApp):
     
@@ -181,6 +190,9 @@ class ExampleSwitch13(app_manager.RyuApp):
 
             if ip_pkt.src in db1 and ip_pkt.dst in db1:
                 #self.logger.info("Adding flow for IP packet")
+                if db1[ip_pkt.src]['rloc']==db1[ip_pkt.dst]['rloc']:
+                    self.logger.info("dropping ip packet for hosts in same rloc: %s", db1[ip_pkt.src]['rloc'])
+                    return 0
 
                 self.xtr_flow_entry(ev)
 
@@ -225,9 +237,9 @@ class ExampleSwitch13(app_manager.RyuApp):
             return 0
 
         elif p_ipv4_src in db1 and p_ipv4_dst not in db1:
-            self.logger.info("\nSource registered but Destination does not exist\n")
+            self.logger.info("\nSource %s registered but Destination %s does not exist\n", p_ipv4_src,p_ipv4_dst)
             #add flow to drop packet
-            self.logger.info("Add 1 priority flow on iTR to drop packets for EID: %s",p_ipv4_dst)
+            #self.logger.info("Add 1 priority flow on iTR to drop packets for EID: %s",p_ipv4_dst)
             itr_datapath=dp
             """
             match = ofp_parser.OFPMatch(
@@ -250,7 +262,7 @@ class ExampleSwitch13(app_manager.RyuApp):
             actions = [ofp_parser.OFPActionOutput(in_port,
                 ofp.OFPCML_NO_BUFFER,),]
 
-            self.add_flow(itr_datapath, 1, match, actions)
+            #self.add_flow(itr_datapath, 1, match, actions)
             
         #elif p_ipv4_src in db1 and db1[p_ipv4_src]["rloc"] == dpidToIp[str(DPID)]:
             #self.logger.info("Host %s is not mobile",p_ipv4_src)
@@ -259,6 +271,20 @@ class ExampleSwitch13(app_manager.RyuApp):
 
         #self.logger.info("SRC_IP:%s", IPV4_SRC)
 
+
+        # if arp packet and ipv4_dst and ipv4_src is a registered host and same rloc then reply for arp with host_mac
+        if etherFrame.ethertype == ether.ETH_TYPE_ARP:
+            eth_pkt = packet.get_protocol(ethernet)
+            if p_ipv4_dst in db1 and p_ipv4_src in db1:
+                if db1[p_ipv4_src]['rloc']==db1[p_ipv4_dst]['rloc']:
+                    self.logger.info("\nARP request for host in same rloc : %s",p_ipv4_dst)
+                    arp_src_mac=db1[p_ipv4_dst]['host_mac']
+                    arp_src_ip=p_ipv4_dst
+                    arp_dst_mac=src_mac
+                    arp_dst_ip=p_ipv4_src
+                    arp_out_port=in_port
+                    self.reply_arp(dp, arp_src_mac, arp_src_ip, arp_dst_mac, arp_dst_ip, in_port)
+                    return 0
 
         # if arp packet and ipv4_dst and ipv4_src is a registered host then reply for arp
         if etherFrame.ethertype == ether.ETH_TYPE_ARP:
@@ -702,8 +728,12 @@ class ExampleSwitch13(app_manager.RyuApp):
             rloc_counter[dpidToIp[str(datapath.id)]]=0
 
             
-            self.logger.info(pprint(db0))
-            self.logger.info("RLOC discovery complete\n\n")
+            #self.logger.info(pprint(db0))
+            self.logger.info("RLOC discovery complete: %s\n\n",dpidToIp[str(datapath.id)])
+            self.logger.info('Setting arp entry for rloc')
+            cmd="sudo arp -s "+dpidToIp[str(datapath.id)]+' '+dpidToMac[str(datapath.id)]
+            self.logger.info('command: %s', cmd)
+            os.system(cmd)
             #for p in packet.protocols:
             #    print p
 
